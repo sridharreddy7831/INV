@@ -1,46 +1,14 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
 const IS_PROD = import.meta.env.PROD;
 
-/**
- * Local Storage Mock DB
- * Used only in development or as a temporary emergency cache.
- */
 const mockDb = {
-    get: (key: string) => {
-        const data = localStorage.getItem(`inv_${key}`);
-        if (!data) return [];
-        try {
-            return JSON.parse(data);
-        } catch (e) {
-            console.error(`[CRITICAL] LocalStorage Corrupted for key: inv_${key}. Resetting to empty array.`);
-            return [];
-        }
-    },
-    save: (key: string, data: any) => {
-        try {
-            localStorage.setItem(`inv_${key}`, JSON.stringify(data));
-        } catch (e: any) {
-            if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-                console.error(`[CRITICAL] Browser Storage Full! Key: inv_${key}. Cannot save changes locally.`);
-                alert('CRITICAL ERROR: Browser storage is full. Please delete some old data or use a real backend to save this product.');
-            } else {
-                console.error(`[ERROR] Failed to save to localStorage:`, e);
-            }
-        }
-    }
+    get: (key: string) => JSON.parse(localStorage.getItem(`inv_${key}`) || '[]'),
+    save: (key: string, data: any) => localStorage.setItem(`inv_${key}`, JSON.stringify(data))
 };
 
 /**
- * Hash a password using SHA-256 for mock security.
+ * request wrapper with Auth and Error handling
  */
-async function hashPassword(password: string): Promise<string> {
-    const salt = 'nexarats_secure_salt_v1';
-    const msgUint8 = new TextEncoder().encode(password + salt);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const sessionToken = sessionStorage.getItem('inv_token');
 
@@ -61,124 +29,43 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 
         if (!res.ok) {
             const err = await res.json().catch(() => ({ error: res.statusText }));
-            throw new Error(err.error || `API Error: ${res.status}`);
+            throw new Error(err.error || err.message || `API Error: ${res.status}`);
         }
         return res.json();
     } catch (error: any) {
-        // In Production, we do NOT fall back to localStorage silently as it creates data fragmentation.
-        // We only allow it in Development or if explicitly enabled via a flag.
-        const isNetworkError = error.message === 'Failed to fetch';
+        // Only fallback to LocalStorage if explicitly allowed and backend is down
+        const isNetworkError = error.message === 'Failed to fetch' || error.message.includes('API Unreachable');
 
         if (isNetworkError && !IS_PROD) {
-            console.warn(`[DEV ONLY] API Unreachable (${endpoint}). Falling back to LocalStorage.`);
+            console.warn(`[RECOVERY] API Unreachable (${endpoint}). Falling back to LocalStorage Mock.`);
 
-            const path = endpoint.split('?')[0].split('/')[1]; // e.g. 'products' from '/products'
+            // SECURITY: Never mock Auth/User data in local storage for protection
+            if (endpoint.includes('/auth') || endpoint.includes('/users')) {
+                throw new Error('Authentication requires a secure backend connection.');
+            }
+
+            const path = endpoint.split('?')[0].split('/')[1];
             const method = options?.method || 'GET';
             const body = options?.body ? JSON.parse(options.body as string) : null;
-            const segments = endpoint.split('/').filter(Boolean); // ['', 'products', '123'] -> ['products', '123']
+            const segments = endpoint.split('/').filter(Boolean);
 
-            // GET ALL
-            if (method === 'GET' && segments.length === 1) {
-                return mockDb.get(path) as T;
+            if (method === 'GET' && segments.length === 1) return mockDb.get(path) as T;
+            if (method === 'POST' && endpoint.endsWith('/seed')) {
+                const seedKey = endpoint.includes('products') ? 'products' : path;
+                const seedData = body[seedKey] || [];
+                const merged = [...mockDb.get(path)];
+                seedData.forEach((item: any) => {
+                    if (!merged.find((m: any) => m.id === item.id)) merged.push(item);
+                });
+                mockDb.save(path, merged);
+                return { success: true, [path]: merged } as any;
             }
-
-            // GET ONE
-            if (method === 'GET' && segments.length === 2) {
-                const data = mockDb.get(path);
-                return data.find((item: any) => item.id === segments[1]) as T;
-            }
-
-            // CREATE / SEED / AUTH
+            // Standard Mock CRUD
             if (method === 'POST') {
                 const data = mockDb.get(path);
-
-                // MOCK LOGIN
-                if (endpoint.includes('/users/login') || endpoint.includes('/auth/login-password')) {
-                    const { email, phone, password } = body;
-                    const loginKey = email || phone;
-                    const user = data.find((u: any) => u.email === loginKey || u.phone === loginKey);
-
-                    if (user) {
-                        const hashed = await hashPassword(password);
-                        // In mock mode, we fallback to plain comparison if the stored password isn't a hash yet (for legacy mock data)
-                        const isMatch = (user.password === hashed) || (user.password === password);
-
-                        if (isMatch) {
-                            return {
-                                success: true,
-                                token: `mock_jwt_${btoa(loginKey)}`,
-                                user,
-                                phone: user.phone,
-                                loggedIn: true,
-                                customer: user
-                            } as any;
-                        }
-                    }
-                    throw new Error('Invalid credentials');
-                }
-
-                // MOCK SIGNUP / SET PASSWORD
-                if (endpoint.includes('/auth/signup') || endpoint.includes('/auth/set-password')) {
-                    const hashed = await hashPassword(body.password);
-                    const newItem = { ...body, password: hashed, id: body.id || `user_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
-                    mockDb.save(path, [newItem, ...data]);
-                    return { success: true, user: newItem, token: `mock_jwt_${btoa(body.phone || body.email)}` } as any;
-                }
-
-                if (endpoint.endsWith('/seed')) {
-                    const seedKey = endpoint.includes('products') ? 'products' : path;
-                    const seedData = body[seedKey] || [];
-                    const merged = [...data];
-                    seedData.forEach((item: any) => {
-                        if (!merged.find((m: any) => m.id === item.id)) merged.push(item);
-                    });
-                    mockDb.save(path, merged);
-                    return { success: true, [path]: merged } as any;
-                }
-                const newItem = { ...body, id: body.id || `item_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
+                const newItem = { ...body, id: body.id || `item_${Date.now()}` };
                 mockDb.save(path, [newItem, ...data]);
                 return newItem as T;
-            }
-
-            // UPDATE
-            if (method === 'PUT' && segments.length === 2) {
-                const data = mockDb.get(path);
-                const updated = data.map((item: any) => item.id === segments[1] ? { ...item, ...body } : item);
-                mockDb.save(path, updated);
-                return body as T;
-            }
-
-            // BULK UPDATE (Special case for products)
-            if (method === 'PUT' && endpoint.includes('bulk/update')) {
-                const data = mockDb.get('products');
-                const updates = body.products || [];
-                const updated = data.map((item: any) => {
-                    const upItem = updates.find((u: any) => u.id === item.id);
-                    return upItem ? { ...item, ...upItem } : item;
-                });
-                mockDb.save('products', updated);
-                return updated as any;
-            }
-
-            // MOCK WHATSAPP
-            if (endpoint.includes('/whatsapp/status')) {
-                return { success: true, data: { status: 'ready', connectionInfo: { pushName: 'Nexarats Admin', phoneNumber: '9100000000', platform: 'Mock' }, queueLength: 0, reconnectAttempts: 0, uptime: 3600 } } as any;
-            }
-
-            if (endpoint.includes('/whatsapp/qr')) {
-                return { success: true, qr: 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=MOCK_WHATSAPP_QR' } as any;
-            }
-
-            if (endpoint.includes('/invoices/send-bulk-message')) {
-                const { customers } = body;
-                return { success: true, sent: customers.length, failed: 0, skipped: 0 } as any;
-            }
-
-            // DELETE
-            if (method === 'DELETE' && segments.length === 2) {
-                const data = mockDb.get(path);
-                mockDb.save(path, data.filter((item: any) => item.id !== segments[1]));
-                return { success: true } as any;
             }
         }
         throw error;
