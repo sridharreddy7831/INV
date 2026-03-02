@@ -1,0 +1,87 @@
+# NEXA POS - Full System Architecture & Tech Report
+
+This document provides a comprehensive technical overview of the NEXA POS application, covering both the React-based frontend and the Express/PostgreSQL-based backend.
+
+---
+
+## 1. System Overview
+
+**NEXA POS** is a modern, enterprise-grade Point of Sale and Inventory Management system. It features a robust administration panel for managing products, customers, vendors, purchases, and sales transactions, alongside a customer-facing storefront.
+
+### Tech Stack
+*   **Frontend**: React (18+), TypeScript, Tailwind CSS, Lucide Icons, Vite.
+*   **Backend**: Node.js, Express.js, TypeScript, Prisma ORM.
+*   **Database**: PostgreSQL.
+*   **Integrations**: WhatsApp Business API (via external microservice).
+
+---
+
+## 2. Frontend Architecture (React)
+
+Located in `apps/frontend/`, the frontend is built as a Single Page Application (SPA) designed for high performance and a premium user experience.
+
+### 2.1 Core Concepts & State Management
+*   **Global State (`AppContext.tsx`)**: Manages the entire application state centrally.
+    *   Holds data for Products, Customers, Vendors, Transactions, Users, and Purchases.
+    *   Handles authentication state (`currentUser`) and page routing state.
+    *   `loadData()` function: Fetches all data from the backend on application mount, preventing circular dependency deadlocks with protected routes.
+*   **Data Fetching (`services/api.ts`)**: A structured API client wrapper using `fetch`.
+    *   Includes interceptors for authentication (`x-session-token`).
+    *   Strictly expects unwrapped JSON responses (e.g., returning arrays directly for lists).
+*   **Routing**: Custom state-based routing mapped to components (e.g., `'dashboard'` -> `<Dashboard />`), wrapped in a `ProtectedRoute` component that verifies authentication and data loading states.
+*   **Local Storage (`useLocalStorage.ts`)**: Used extensively for persisting cart data, offline sync queues, and UI preferences (like WhatsApp settings).
+
+### 2.2 Key Features & Pages
+*   **Storefront (`/`)**: A public-facing e-commerce interface where customers can browse catalogs, add items to a cart, and checkout. Includes its own auth flow and wishlist management.
+*   **Admin Dashboard (`/admin`)**:
+    *   **Inventory**: Full CRUD for products, bulk updates, low stock alerts.
+    *   **Billing/POS**: Interface for creating new sales transactions, applying discounts, calculating GST. Features split payments (Cash, UPI, Card).
+    *   **Transactions/Invoices**: History of all sales, with PDF invoice generation and WhatsApp receipt sending.
+    *   **Customers & Vendors**: Management and ledger tracking for both.
+    *   **Purchases**: Tracking incoming stock from vendors.
+*   **WhatsApp Settings**: A sophisticated interface to pair WhatsApp via QR code, set up automated messages (order confirmations, receipts), and view real-time connection status.
+
+---
+
+## 3. Backend Architecture (Node.js/Express)
+
+Located in `apps/backend/`, the backend follows a clean, layered architecture designed for scalability and maintainability.
+
+### 3.1 Core Architecture Patterns
+*   **Router -> Service -> Database Pattern**:
+    *   *Routers* handle HTTP transport, parsing, and validation.
+    *   *Services* handle business logic and formatting.
+    *   *Prisma* handles database interactions.
+*   **Generic CRUD Factory (`crud.service.ts`, `crud.router.ts`)**:
+    *   To enforce the DRY (Don't Repeat Yourself) principle, boilerplate CRUD operations (findAll, findById, create, update, delete, seed) are abstracted into a factory pattern.
+    *   Modules like `products`, `customers`, and `vendors` extend this factory, adding only their specific custom logic.
+*   **Data Sanitation**: Services map frontend-specific enum strings (e.g., `"In Stock"`) to PostgreSQL-compatible enums (e.g., `"IN_STOCK"`), ensuring smooth data flow without modifying the existing frontend payload structure.
+
+### 3.2 Database Schema (Prisma PostgreSQL)
+The database is strictly typed with relations and constraints:
+*   `User`: System administrators and staff (with hashed passwords).
+*   `Product`: Inventory items, tracking stock, GST, MRP.
+*   `Customer` & `Vendor`: Entity management with financial ledgers (total spent/pending).
+*   `Transaction` & `TransactionItem`: Sales records with nested items.
+*   `Purchase` & `PurchaseItem`: Restocking records.
+*   `StoreCustomer`, `StoreAddress`, `StoreOrder`: Separate entities for the public storefront interactions.
+
+### 3.3 API Layer & Endpoints
+The backend exposes 60+ endpoints, perfectly mapped to the frontend's expectations. Key design choices include:
+*   **Raw Responses**: The API returns arrays and objects directly (e.g., `res.json(data)`) rather than wrapping them in `{ data: ... }` objects, strictly adhering to what the existing frontend `api.ts` expects.
+*   **Authentication**: Uses dual-token architecture (Access Token + Refresh Token via JWT). Protected endpoints use a `sessionGuard` middleware.
+
+### 3.4 WhatsApp Microservice Integration
+The most complex external integration is the WhatsApp service (`whatsapp.service.ts`):
+*   **Architecture**: Interacts with an external RPC (Remote Procedure Call) style microservice (`whatsapp-services-liart.vercel.app`).
+*   **Dynamic Sessions**: To prevent sessions from getting "stuck" (e.g., `init_error`) on the remote server, the backend dynamically generates a unique `RUNTIME_SESSION_ID` upon every server boot (e.g., `nexarats_a7b8c9`). This guarantees a fresh instance is always available for QR code pairing.
+*   **Graceful Degradation**: If the external service is down, the `/status` and `/qr` endpoints gracefully return `{ status: "disconnected" }` rather than crashing the frontend with 502/500 errors.
+
+---
+
+## 4. Notable Fixes & Engineering Decisions
+
+During the integration of the new backend with the existing frontend, several critical architecture bridges were built:
+1.  **Circular Dependency Resolution**: Fixed a deadlock where the frontend UI wouldn't load because the `ProtectedRoute` awaited data, but the data loader was trapped inside the `ProtectedRoute`. Moved data loading to the root `AppProvider` mount phase.
+2.  **Enum Bridging**: Implemented `sanitize*Data()` functions in backend services. The frontend heavily used human-readable strings (`"Cash"`, `"Returnable"`), which caused Prisma validation errors against database Enums (`"CASH"`, `"RETURNABLE"`). The bridging logic intercepts and translates these silently.
+3.  **WhatsApp "Init Error" Bypass**: The external WhatsApp API frequently locked session IDs into an unrecoverable `init_error` state. By dynamically appending a random string to the session ID at boot time, the system inherently circumvents stuck remote states without requiring destructive global `clear-all` commands.
