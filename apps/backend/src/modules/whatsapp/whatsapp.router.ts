@@ -29,7 +29,7 @@ router.get('/qr', async (_req: Request, res: Response) => {
         // The upstream API returns { action: "qr", qr: "base64..." }
         res.json({
             success: true,
-            qr: data.qr || null,
+            qr: data.qr || data.qrDataUrl || null,
         });
     } catch (err: any) {
         res.json({

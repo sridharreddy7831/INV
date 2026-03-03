@@ -4,9 +4,8 @@ import { ExternalServiceError } from '../../utils/errors';
 const WA_BASE = config.whatsapp.apiUrl;
 const WA_ENDPOINT = `${WA_BASE}/api/whatsapp`;
 
-// Generate a unique session ID on boot to completely bypass stuck "init_error" sessions
-// Example: nexarats_a7b8c9
-const RUNTIME_SESSION_ID = `${config.whatsapp.sessionId || 'nexarats'}_${Math.random().toString(36).substring(2, 8)}`;
+// Use a stable session ID so the backend can reconnect to existing sessions across restarts
+const RUNTIME_SESSION_ID = config.whatsapp.sessionId || 'nexarats';
 
 /**
  * WhatsApp Unified API Layer (RPC)

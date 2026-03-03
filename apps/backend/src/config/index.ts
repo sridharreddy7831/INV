@@ -18,8 +18,8 @@ export const config = {
     },
 
     whatsapp: {
-        apiUrl: process.env.WHATSAPP_API_URL || 'https://whatsapp-services-liart.vercel.app',
-        sessionId: process.env.WHATSAPP_SESSION_ID || 'default',
+        apiUrl: process.env.WHATSAPP_API_URL || 'http://localhost:5000',
+        sessionId: process.env.WHATSAPP_SESSION_ID || 'nexarats',
     },
 
     cors: {
